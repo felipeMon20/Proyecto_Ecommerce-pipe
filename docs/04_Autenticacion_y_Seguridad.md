@@ -11,6 +11,8 @@ Archivo principal: `gestion/views/views_usuarios.py`. Hallazgos priorizados en [
 
 Usuario inexistente y clave incorrecta devuelven el mismo mensaje (401), y un código incorrecto/vencido/inexistente devuelve el mismo 400, para no revelar qué cuentas existen.
 
+`auth/registro` (12-10-2026): rechaza correo o usuario duplicado y aplica los validadores de contraseña de Django (mínimo 8, no común, no solo numérica).
+
 ## 2. Bloqueo por intentos
 
 `PerfilSeguridad`: 3 fallos → bloqueo de 5 minutos y el contador vuelve a 0. Cuenta **tanto claves incorrectas (paso 1) como códigos incorrectos (paso 2)** y al bloquear en el paso 2 se invalida el código. Constantes en `views_usuarios.py`: `MAX_INTENTOS`, `MINUTOS_BLOQUEO`, `MINUTOS_VIGENCIA_CODIGO`.
@@ -19,6 +21,7 @@ Usuario inexistente y clave incorrecta devuelven el mismo mensaje (401), y un c�
 
 `REST_FRAMEWORK` configura `JWTAuthentication`, pero **solo las vistas decoradas con `@api_view` lo usan**; hoy es únicamente `prueba_token_jwt`. Todas las demás son vistas Django planas que leen `request.user` del middleware de sesión. Consecuencias confirmadas por el código:
 
+- **El frontend evita este problema** usando sesión por cookie a través del proxy de Vite (ver [[07_Frontend_y_Guia_de_Pruebas]] §1); el JWT sigue sin usarse.
 - Un cliente que mande solo `Authorization: Bearer <token>` es tratado como **anónimo** en carrito, ventas, dashboard, etc.
 - Con el frontend en otro origen (`localhost:5173`), la sesión por cookie necesita `CORS_ALLOW_CREDENTIALS = True` y `fetch(..., {credentials:'include'})`; el primero no está en `settings.py`.
 - No hay endpoint de refresh (`TokenRefreshView`), así que el `refresh_token` entregado no sirve.

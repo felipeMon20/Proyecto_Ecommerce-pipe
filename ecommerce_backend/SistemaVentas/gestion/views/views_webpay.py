@@ -58,7 +58,7 @@ def iniciar_pago(request):
 
     try:
         data = json.loads(request.body)
-    except json.JSONDecodeError:
+    except ValueError:
         return JsonResponse({'error': 'JSON inválido'}, status=400)
 
     items = data.get('items', [])

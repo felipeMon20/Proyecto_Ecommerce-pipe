@@ -4,6 +4,8 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
@@ -119,7 +121,7 @@ def solicitar_login(request):
 
     try:
         data = json.loads(request.body)
-    except json.JSONDecodeError:
+    except ValueError:
         return JsonResponse({'error': 'JSON inválido'}, status=400)
 
     username = data.get('username')
@@ -177,7 +179,7 @@ def verificar_codigo_login(request):
 
     try:
         data = json.loads(request.body)
-    except json.JSONDecodeError:
+    except ValueError:
         return JsonResponse({'error': 'JSON inválido'}, status=400)
 
     codigo_ingresado = str(data.get('codigo') or '')
@@ -246,6 +248,14 @@ def registrar_usuario(request):
 
             if User.objects.filter(email=email).exists():
                 return JsonResponse({'error': 'Correo ya registrado'}, status=400)
+
+            if User.objects.filter(username=username).exists():
+                return JsonResponse({'error': 'Ese nombre de usuario ya existe'}, status=400)
+
+            try:
+                validate_password(password, user=User(username=username, email=email))
+            except ValidationError as errores:
+                return JsonResponse({'error': ' '.join(errores.messages)}, status=400)
 
             user = User.objects.create_user(
                 username=username, password=password, email=email,

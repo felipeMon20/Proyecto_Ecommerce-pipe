@@ -60,6 +60,8 @@ def lista_productos(request):
                 'precio': p.precio,
                 'stock': p.stock,
                 'marca': p.marca,
+                'descripcion': p.descripcion or '',
+                'categoria_id': p.categoria_id,
                 'categoria': p.categoria.nombre if p.categoria else 'Sin Categoría',
                 'imagenes': fotos,
                 'calificacion_promedio': round(promedio, 1) if promedio else 0, # Nuevo campo

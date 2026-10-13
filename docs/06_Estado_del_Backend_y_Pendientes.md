@@ -8,7 +8,7 @@ Auditoría del 12-10-2026. **Certeza:** hallazgos confirmados leyendo el código
 
 > **12-10-2026:** el backend ya redirige a `{FRONTEND_URL}/pago/resultado?estado=...` y maneja rechazo/aborto (ver [[05_Ventas_Carrito_y_Webpay]] §3). Los puntos 1, 3 y 4 de abajo siguen vigentes para el frontend/autenticación; el punto 3 del backend (retorno en JSON) quedó corregido.
 
-Causas confirmadas:
+Causas confirmadas (los puntos 1, 3 y 4 se resolvieron el 12-10-2026 con el frontend de [[07_Frontend_y_Guia_de_Pruebas]]):
 1. El frontend no implementa el pago: `pixelappstore/src/pages/CheckoutPage.jsx` es solo un `<h1>`.
 2. El backend solo entrega `url_webpay` + `token`; alguien debe hacer el POST/redirect a Webpay con `token_ws`. Nada lo hace.
 3. El retorno (`http://127.0.0.1:8000/webpay/confirmar`) está fijo y responde **JSON**, no redirige a la tienda: el usuario terminaría viendo JSON crudo.
@@ -20,7 +20,7 @@ Causas confirmadas:
 |---|---|---|
 | C1 | ✅ *Corregido 12-10-2026 (BYPASS solo con `DEBUG=True`).* **Token `BYPASS_<id>` marca cualquier venta como pagada sin pasar por Transbank.** | `views_webpay.confirmar_pago` |
 | C2 | ✅ *Corregido 12-10-2026 (decoradores en `gestion/permisos.py`).* **Sin control de acceso** en crear/editar/eliminar productos, carga masiva, `eliminar-todos`, `productos/reemplazar`, `usuarios/reemplazar` y `ventas/registrar`. Cualquiera anónimo puede borrar el catálogo, **borrar todos los usuarios y recrear `admin_felipe/admin123` como superusuario**, o registrar ventas pagadas. | `views_productos`, `views_usuarios`, `views_ventas` |
-| C3 | **JWT no se aplica** en vistas Django planas: el login entrega tokens que ninguna vista reconoce; no hay refresh endpoint. Con frontend en otro origen la sesión por cookie tampoco funciona. | `settings.py`, todas las vistas |
+| C3 | 🟡 *Mitigado en el frontend 12-10-2026 (sesión por cookie + proxy de Vite). El JWT sigue sin aplicarse en las vistas; relevante solo para clientes móviles/API.* **JWT no se aplica** en vistas Django planas: el login entrega tokens que ninguna vista reconoce; no hay refresh endpoint. Con frontend en otro origen la sesión por cookie tampoco funciona. | `settings.py`, todas las vistas |
 | C4 | 🟡 *`.gitignore` corregido 12-10-2026; revisión previa a subir el 12-10-2026: no hay secretos en archivos versionables; falta `SECRET_KEY` nueva, correo nuevo y repo limpio (sin historial con el `.env` viejo).* `.gitignore` solo ignora `node_modules/`: `.env` (SECRET_KEY y clave Gmail), `db.sqlite3`, `media/` y fixtures con correos y claves en texto plano pueden estar en GitHub. | `.gitignore` raíz |
 
 Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `SECRET_KEY`** aunque se borre el archivo después (queda en el historial).
@@ -40,7 +40,7 @@ Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `
 
 ## 4. Medios
 
-- `registrar_usuario`: no valida contraseña (validators), no comprueba `username` duplicado (IntegrityError → 500 con el mensaje interno), devuelve `str(e)` al cliente en muchas vistas (fuga de detalles).
+- ✅ *Corregido 12-10-2026:* `registrar_usuario` no validaba contraseña ni `username` duplicado. Sigue pendiente que muchas vistas devuelvan `str(e)` al cliente (fuga de detalles).
 - `confirmar_cambio_password` no aplica validadores; el correo de recuperación manda UID/TOKEN, no un enlace.
 - `Venta.codigo_comprobante` y `HistorialEstadoVenta.usuario_responsable` nunca se llenan; `AuditLog` de eliminar producto siempre con `usuario=None`.
 - Carrito del servidor desconectado del checkout: ahora se vacía lo comprado tras pagar (12-10-2026), pero `iniciar_pago` sigue recibiendo `items` en el body en vez de leer el carrito.

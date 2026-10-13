@@ -18,7 +18,7 @@ Este archivo **no debe duplicar** conocimiento que ya existe en `/docs`.
 ## 2. Alcance del proyecto
 
 - **Backend (Django + DRF + SQLite)**: en alcance. Es lo único documentado y auditado.
-- **Frontend (`pixelappstore/`, React + Vite)**: **fuera de alcance por ahora**. Es un esqueleto casi vacío (p. ej. `CheckoutPage.jsx` es solo un `<h1>`). No auditarlo ni documentarlo salvo que el usuario lo pida.
+- **Frontend (`pixelappstore/`, React + Vite)**: en alcance desde el 12-10-2026 (pantallas de compra y pago). Documentado en [[07_Frontend_y_Guia_de_Pruebas]]. Usa proxy de Vite + sesión por cookie.
 
 ---
 
@@ -57,6 +57,7 @@ Cuando un cambio modifique arquitectura, modelos, endpoints, seguridad, reglas d
 | `docs/04_Autenticacion_y_Seguridad.md` | Login 2FA, bloqueo, JWT vs sesión, recuperación de clave, permisos. |
 | `docs/05_Ventas_Carrito_y_Webpay.md` | Carrito, POS, flujo de pago Webpay, cupones, stock. |
 | `docs/06_Estado_del_Backend_y_Pendientes.md` | Auditoría: fallas, riesgos y pendientes priorizados. |
+| `docs/07_Frontend_y_Guia_de_Pruebas.md` | Pantallas del frontend, arquitectura (proxy/sesión) y pasos para probar el flujo de compra. |
 
 ---
 
@@ -72,7 +73,7 @@ Cuando un cambio modifique arquitectura, modelos, endpoints, seguridad, reglas d
 | `.../gestion/views/` | `views_productos`, `views_usuarios`, `views_ventas`, `views_webpay`, `views_dashboard`. |
 | `.../gestion/fixtures/` | `usuarios.json`, `productos.json` (usados por endpoints "reemplazar"). |
 | `.../db.sqlite3`, `.../media/` | Base de datos e imágenes locales. **Tratar con precaución.** |
-| `pixelappstore/` | Frontend (fuera de alcance). |
+| `pixelappstore/` | Frontend React + Vite (`src/pages`, `src/components`, `src/contexto`, `src/api.js`). Instalar con caché y TEMP en D:. |
 
 ---
 
@@ -82,6 +83,7 @@ Cuando un cambio modifique arquitectura, modelos, endpoints, seguridad, reglas d
 - **No modificar `.env`** ni `db.sqlite3` salvo que la tarea lo requiera explícitamente.
 - **No ejecutar los endpoints `reemplazar` / `eliminar-todos`** contra la base real: borran productos o usuarios. Usar una copia de la BD.
 - **No eliminar archivos o datos** sin autorización explícita.
+- **Node/npm:** `node_modules/` se instala en el proyecto (D:), pero el caché de npm va por defecto a C:; usar `npm_config_cache` y `TEMP` apuntando a D: y borrar esas carpetas al terminar.
 - **Instalaciones solo en D:** el disco C: no tiene espacio. Nunca instalar paquetes de forma global. Si hace falta Django u otra dependencia, usar un venv dentro del proyecto (`python -m venv ecommerce_backend\.venv`) y apuntar el caché y temporales a D: (`pip install --cache-dir D:\pip-cache`, `TMP`/`TEMP` en D:). Pedir confirmación antes de instalar.
 - Antes de **cambios estructurales** (migraciones, cambios de modelo, refactors que toquen varias vistas), explicar qué archivos se afectan y esperar confirmación si la instrucción no lo cubre.
 - Las credenciales de `fixtures/usuarios.json` son de desarrollo; no reutilizarlas ni citarlas como válidas en producción.

@@ -9,7 +9,7 @@ Leyenda: 🔴 sin verificación de usuario · 🟡 requiere sesión · 🟢 requ
 ## Productos
 | Ruta | Método | Acceso |
 |---|---|---|
-| `productos/listar` (filtros `q`, `categoria`, `precio_min`, `precio_max`) | GET | público |
+| `productos/listar` (devuelve también `categoria_id` y `descripcion`; filtros `q`, `categoria`, `precio_min`, `precio_max`) | GET | público |
 | `productos/relacionados/<id>` | GET | público |
 | `productos/crear` (multipart, imágenes png/jpg) | POST | 🔴 |
 | `productos/editar/<id>` | PUT | 🔴 |
