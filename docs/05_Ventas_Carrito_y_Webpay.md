@@ -10,23 +10,37 @@ Un `Carrito` por usuario, requiere sesión. `agregar` suma cantidad y valida sto
 
 `ventas/registrar`: dentro de `transaction.atomic()`, crea la venta directamente en `pagado`, bloquea cada producto con `select_for_update`, valida stock y lo descuenta. Asigna `usuario` = quien llama (el vendedor). No aplica cupón ni envío. Desde 12-10-2026 exige usuario staff.
 
-## 3. Flujo de pago Webpay Plus (ambiente de pruebas)
+## 3. Flujo de pago Webpay Plus
 
-1. **`webpay/iniciar`** (POST): lee `items`, `region`, `cupon`. Precios tomados de la BD (bien). Cupón: porcentaje sobre el subtotal. Envío fijo: $3.000 si región es `RM`/`metropolitana`, $6.000 en otro caso. Crea `Venta` en `pendiente` y sus `DetalleVenta`, llama a `Transaction.create(buy_order=venta.id, session_id aleatorio, monto, url_retorno)` y devuelve `url_webpay` + `token`. Desde 12-10-2026 valida cantidad (≥ 1) y stock en este punto, pero no descuenta (eso ocurre al confirmar).
-2. El navegador debe redirigir a `url_webpay` con el token. **El backend no genera ningún redirect**; eso depende del frontend (hoy `CheckoutPage.jsx` es solo un título).
-3. Webpay redirige al `url_retorno`, fijo en `http://127.0.0.1:8000/webpay/confirmar`.
-4. **`webpay/confirmar`**: lee `token_ws` (GET, POST o JSON), hace `commit`; si el estado es `AUTHORIZED`, en una transacción pasa la venta a `pagado`, descuenta stock (falla con excepción si no alcanza) y envía correo de resumen si el usuario tiene email. Responde **JSON** (no redirige de vuelta a la tienda).
-5. Credenciales: código de comercio y API key de **integración** de la librería (`IntegrationCommerceCodes.WEBPAY_PLUS`, `IntegrationApiKeys.WEBPAY`), `IntegrationType.TEST`. No hay modo producción.
+> **Reescrito 12-10-2026.** Verificado con 37 pruebas manuales usando un Transbank simulado, base en memoria y correo simulado; no hay tests en el repo ni se probó contra el ambiente real de Transbank.
 
-## 4. Modo BYPASS
+1. **`webpay/iniciar`** (POST): valida cada item (cantidad entera ≥ 1, producto existente, stock suficiente sumando repetidos), calcula cupón (porcentaje limitado a 0-100) y envío ($3.000 en `RM`/`metropolitana`, $6.000 en otro caso). Crea `Venta` en `pendiente` + `DetalleVenta`, llama a `Transaction.create` y **guarda el token de Webpay en `Venta.codigo_comprobante`**. Devuelve `url_webpay` + `token`. Si Transbank falla responde 502 y la venta se revierte. No descuenta stock.
+2. El **frontend** debe enviar al navegador a `url_webpay` con `token_ws` (hoy no existe esa pantalla; ver [[06_Estado_del_Backend_y_Pendientes]]).
+3. Webpay vuelve a `WEBPAY_RETURN_URL` (GET o POST).
+4. **`webpay/confirmar`** ya no devuelve JSON: **siempre redirige** a `{FRONTEND_URL}/pago/resultado?estado=<...>&venta=<id>`. Estados posibles:
 
-> **Actualizado 12-10-2026:** el atajo solo funciona con `DEBUG=True`. Con `DEBUG=False` el token se envía a Transbank como cualquier otro.
+| `estado` | Cuándo |
+|---|---|
+| `exito` | Autorizado y venta pagada (también si se recarga la página: no se vuelve a cobrar). |
+| `rechazado` | El banco rechazó; no había stock antes de cobrar; o el stock se agotó después del cobro (se reembolsa). |
+| `cancelado` | El usuario abortó en Webpay (`TBK_TOKEN`) o se agotó el tiempo (sin token). |
+| `error` | Token que no corresponde a ninguna venta, falla del commit, o monto/orden distintos a los esperados (se reembolsa). |
 
-Si el `token_ws` empieza con `BYPASS_`, `confirmar_pago` lo trata como `AUTHORIZED` y toma el id de venta de lo que sigue (`BYPASS_<venta_id>`), **sin consultar a Transbank**. Es un atajo de desarrollo que sigue activo. Ver [[06_Estado_del_Backend_y_Pendientes]] (crítico).
+5. Orden interno de `confirmar`: token desconocido → error; venta ya pagada → éxito sin tocar nada; **verifica stock antes del commit** (si falta, no se cobra); `commit`; valida `AUTHORIZED` + `response_code 0`, orden y monto; descuenta stock con `select_for_update` y marca `pagado` en una sola transacción; vacía del carrito del usuario lo comprado; envía el correo **después** de confirmar (si falla se registra en el log, ya no se informa un envío falso).
+6. **Reembolso automático**: si tras cobrar el stock se agotó en el intertanto, o los datos no coinciden, se llama a `Transaction.refund`, la venta queda `rechazado` y se escribe un `AuditLog` "Reembolso Webpay". Si el reembolso falla, el `AuditLog` dice **"REEMBOLSO FALLIDO, hacerlo manualmente en Transbank"**: revisar ese registro.
+7. Un aborto solo anula una venta si el `TBK_TOKEN` recibido coincide con el token guardado; así nadie puede anular la compra de otro adivinando el número.
+
+### Configuración (`settings.py` / `.env`)
+
+`FRONTEND_URL` (default `http://localhost:5173`), `WEBPAY_RETURN_URL` (default `http://127.0.0.1:8000/webpay/confirmar`), `WEBPAY_AMBIENTE` (`integracion` por defecto), `WEBPAY_COMMERCE_CODE`, `WEBPAY_API_KEY`. Con `WEBPAY_AMBIENTE=produccion` se exigen las credenciales propias; sin ellas el pago se niega, **no** cae al ambiente de pruebas. Plantilla en `.env.example`.
+
+## 4. Modo BYPASS (solo desarrollo)
+
+Con `DEBUG=True`, un `token_ws` con forma `BYPASS_<venta_id>` marca la venta como pagada sin consultar a Transbank (descuenta stock y envía correo igual). Con `DEBUG=False` no hace nada: se trata como token desconocido (`estado=error`).
 
 ## 5. Estados de venta
 
-`pendiente` → `pagado` (confirmar o POS) · `pendiente` → `anulado` (`cancelar_compra`, por el dueño). `rechazado` está definido pero **ningún código lo asigna**. El historial se escribe por señal ([[02_Modelos_de_Datos]] §4).
+`pendiente` → `pagado` (confirmar o POS) · `pendiente` → `anulado` (`cancelar_compra`, por el dueño). `pendiente` → `rechazado` (banco rechaza, sin stock o reembolso) · `pendiente` → `anulado` también cuando el usuario aborta en Webpay. El historial se escribe por señal ([[02_Modelos_de_Datos]] §4).
 
 ## 6. Reportes
 

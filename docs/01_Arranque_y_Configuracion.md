@@ -13,6 +13,7 @@ Archivo: `SistemaVentas/settings.py`. Ver también [[04_Autenticacion_y_Segurida
 | `ALLOWED_HOSTS` | Lista separada por comas. |
 | `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Cuenta Gmail para SMTP (smtp.gmail.com:587, TLS). |
 | `CORS_ALLOWED_ORIGINS` | Orígenes del frontend (ej. `http://localhost:5173`). |
+| `FRONTEND_URL`, `WEBPAY_RETURN_URL`, `WEBPAY_AMBIENTE`, `WEBPAY_COMMERCE_CODE`, `WEBPAY_API_KEY` | Pago Webpay; todas opcionales con valores de desarrollo. Ver [[05_Ventas_Carrito_y_Webpay]] §3. |
 
 ## 2. Configuración relevante
 
