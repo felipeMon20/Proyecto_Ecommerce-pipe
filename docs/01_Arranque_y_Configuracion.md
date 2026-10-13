@@ -11,6 +11,13 @@ Archivo: `SistemaVentas/settings.py`. Ver también [[04_Autenticacion_y_Segurida
 | `SECRET_KEY` | Clave de Django. Si falta, vale `None` y Django no arranca. |
 | `DEBUG` | Solo es `True` si el valor es exactamente `True`. Default `False`. |
 | `ALLOWED_HOSTS` | Lista separada por comas. |
+| `LIMITES_ACTIVOS` | `True` por defecto; con `False` se apaga el límite de intentos (solo para pruebas). Ver [[04_Autenticacion_y_Seguridad]]. |
+| `IP_CLIENTE_HEADER` | Detrás de un proxy de confianza, cabecera con la IP real (p. ej. `HTTP_X_FORWARDED_FOR`; se usa la última IP de la lista). Vacío = `REMOTE_ADDR` (con `DEBUG=True` el valor por defecto es `HTTP_X_FORWARDED_FOR`, por el proxy de Vite). |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | Claves del captcha de Cloudflare Turnstile. Con `DEBUG=True` y sin definir se usan las de prueba; en producción sin `TURNSTILE_SECRET` el captcha se desactiva. Ver [[04_Autenticacion_y_Seguridad]]. |
+| `SATURACION_RAFAGA` / `SATURACION_SOSTENIDO` / `SATURACION_GLOBAL` | Topes de peticiones a la API: por IP en 10 s (60), por IP en 1 min (300) y de todos en 10 s (800). Ver [[04_Autenticacion_y_Seguridad]]. |
+| `PANEL_RUTA` | Dirección secreta del panel de administración (sin barras). Si no se define se deriva de la `SECRET_KEY`; `python manage.py ruta_panel` la muestra. Ver [[04_Autenticacion_y_Seguridad]]. |
+| `DJANGO_ADMIN_ACTIVO` | `False` por defecto. Con `True` se activa el panel de Django en `/<PANEL_RUTA>-django/` (su login no usa 2FA). |
+| `FORZAR_HTTPS` | Con `DEBUG=False` y HTTPS ya configurado: `True` activa redirección a HTTPS y HSTS (1 año). |
 | `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Cuenta Gmail para SMTP (smtp.gmail.com:587, TLS). |
 | `CORS_ALLOWED_ORIGINS` | Orígenes del frontend (ej. `http://localhost:5173`). |
 | `FRONTEND_URL`, `WEBPAY_RETURN_URL`, `WEBPAY_AMBIENTE`, `WEBPAY_COMMERCE_CODE`, `WEBPAY_API_KEY` | Pago Webpay; todas opcionales con valores de desarrollo. Ver [[05_Ventas_Carrito_y_Webpay]] §3. |

@@ -4,6 +4,8 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.hashers import check_password, make_password
+from django.core.cache import cache
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
@@ -12,6 +14,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
 from ..models import Codigo2FA, PerfilSeguridad, AuditLog 
+from ..errores import error_interno
 from ..permisos import requiere_superusuario
 # --- IMPORT NUEVO PARA JWT (ID 24) ---
 from rest_framework_simplejwt.tokens import RefreshToken 
@@ -24,6 +27,7 @@ import os
 import secrets
 import logging
 import re
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -64,19 +68,23 @@ def reemplazar_usuarios(request):
             
             return JsonResponse({'mensaje': f'Se restauraron {guardados} usuarios correctamente'})
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
 @csrf_exempt
 def eliminar_usuario(request, usuario_id):
     if request.method == 'DELETE':
-        if not request.user.is_staff:
-             return JsonResponse({'error': 'Acceso denegado'}, status=403)
-        if usuario_id == 1:
-            return JsonResponse({'error': 'No puedes eliminar al Super Admin (ID 1)'}, status=403)
+        if not request.user.is_authenticated or not request.user.is_superuser:
+            return JsonResponse({'error': 'Acceso denegado'}, status=403)
+        if usuario_id == 1 or usuario_id == request.user.id:
+            return JsonResponse({'error': 'No puedes eliminar esta cuenta'}, status=403)
         try:
             user = User.objects.get(id=usuario_id)
+            if user.is_staff or user.is_superuser:
+                return JsonResponse({'error': 'Las cuentas del equipo se desactivan desde Empleados, no se eliminan'}, status=400)
+            nombre = user.username
             user.delete()
+            AuditLog.objects.create(usuario=request.user, accion="Eliminar usuario", detalle=f"Cliente eliminado: {nombre}")
             return JsonResponse({'mensaje': 'Usuario eliminado correctamente'})
         except User.DoesNotExist:
             return JsonResponse({'error': 'Usuario no encontrado'}, status=404)
@@ -97,20 +105,29 @@ MINUTOS_BLOQUEO = 5
 MINUTOS_VIGENCIA_CODIGO = 10
 
 
+MAX_MINUTOS_BLOQUEO = 60
+DIAS_MEMORIA_BLOQUEOS = 1
+
+# Hash de una clave cualquiera: se compara cuando el usuario no existe para que la respuesta tarde lo mismo
+_HASH_SENUELO = make_password('clave-senuelo-sin-uso')
+
+MENSAJE_CREDENCIALES = 'Usuario o contraseña incorrectos. Tras varios fallos la cuenta se bloquea unos minutos.'
+MENSAJE_CODIGO = 'Código incorrecto o vencido'
+
+
 def _registrar_intento_fallido(perfil):
-    """ Suma un intento fallido y bloquea la cuenta al llegar al máximo """
+    """ Suma un intento fallido y bloquea la cuenta al llegar al máximo; cada bloqueo seguido dura el doble """
     perfil.intentos_fallidos += 1
     bloqueada = perfil.intentos_fallidos >= MAX_INTENTOS
     if bloqueada:
-        perfil.bloqueado_hasta = timezone.now() + timedelta(minutes=MINUTOS_BLOQUEO)
+        clave = f'bloqueos:{perfil.user_id}'
+        previos = cache.get(clave, 0)
+        cache.set(clave, previos + 1, DIAS_MEMORIA_BLOQUEOS * 86400)
+        minutos = min(MINUTOS_BLOQUEO * (2 ** previos), MAX_MINUTOS_BLOQUEO)
+        perfil.bloqueado_hasta = timezone.now() + timedelta(minutes=minutos)
         perfil.intentos_fallidos = 0
     perfil.save()
     return bloqueada
-
-
-def _respuesta_bloqueo(perfil):
-    segundos = int((perfil.bloqueado_hasta - timezone.now()).total_seconds())
-    return JsonResponse({'error': f'Cuenta bloqueada. Espera {segundos}s.'}, status=403)
 
 
 @csrf_exempt
@@ -126,21 +143,22 @@ def solicitar_login(request):
 
     username = data.get('username')
     password = data.get('password')
-    error_credenciales = JsonResponse({'error': 'Usuario o contraseña incorrectos'}, status=401)
+    error_credenciales = JsonResponse({'error': MENSAJE_CREDENCIALES}, status=401)
 
     user_obj = User.objects.filter(username=username).first()
     if not user_obj:
+        check_password(str(password or ''), _HASH_SENUELO)
         return error_credenciales
 
     perfil, _ = PerfilSeguridad.objects.get_or_create(user=user_obj)
 
     if perfil.bloqueado_hasta and perfil.bloqueado_hasta > timezone.now():
-        return _respuesta_bloqueo(perfil)
+        check_password(str(password or ''), user_obj.password)
+        return error_credenciales
 
     user = authenticate(request, username=username, password=password)
     if user is None:
-        if _registrar_intento_fallido(perfil):
-            return JsonResponse({'error': f'Cuenta BLOQUEADA por {MINUTOS_BLOQUEO} min.'}, status=403)
+        _registrar_intento_fallido(perfil)
         return error_credenciales
 
     if not user.email:
@@ -183,7 +201,7 @@ def verificar_codigo_login(request):
         return JsonResponse({'error': 'JSON inválido'}, status=400)
 
     codigo_ingresado = str(data.get('codigo') or '')
-    error_generico = JsonResponse({'error': 'Código incorrecto o vencido'}, status=400)
+    error_generico = JsonResponse({'error': MENSAJE_CODIGO}, status=400)
 
     user = User.objects.filter(username=data.get('username')).first()
     if not user:
@@ -191,7 +209,7 @@ def verificar_codigo_login(request):
 
     perfil, _ = PerfilSeguridad.objects.get_or_create(user=user)
     if perfil.bloqueado_hasta and perfil.bloqueado_hasta > timezone.now():
-        return _respuesta_bloqueo(perfil)
+        return error_generico
 
     registro_2fa = Codigo2FA.objects.filter(user=user).first()
     if not registro_2fa:
@@ -207,7 +225,6 @@ def verificar_codigo_login(request):
     if not coincide:
         if _registrar_intento_fallido(perfil):
             registro_2fa.delete()
-            return JsonResponse({'error': f'Cuenta BLOQUEADA por {MINUTOS_BLOQUEO} min.'}, status=403)
         return error_generico
 
     registro_2fa.delete()
@@ -216,21 +233,33 @@ def verificar_codigo_login(request):
 
     # Sesión web (cookie) y tokens JWT para la API
     login(request, user)
-    refresh = RefreshToken.for_user(user)
-
-    return JsonResponse({
+    respuesta = {
         'mensaje': 'Autenticación exitosa',
         'usuario': user.username,
         'es_admin': user.is_staff,
         'es_superuser': user.is_superuser,
-        'access_token': str(refresh.access_token),
-        'refresh_token': str(refresh)
-    })
+    }
+    # Los tokens solo se entregan a quien los pide (clientes de API); el sitio web usa la cookie
+    if data.get('jwt') is True:
+        refresh = RefreshToken.for_user(user)
+        respuesta['access_token'] = str(refresh.access_token)
+        respuesta['refresh_token'] = str(refresh)
+    return JsonResponse(respuesta)
 
 @csrf_exempt
 def cerrar_sesion(request):
     logout(request)
     return JsonResponse({'mensaje': 'Sesión cerrada'})
+
+def _enviar_en_segundo_plano(asunto, mensaje, destino):
+    """ El envío no demora la respuesta, así que no delata si el correo existe """
+    def enviar():
+        try:
+            send_mail(asunto, mensaje, settings.EMAIL_HOST_USER, [destino], fail_silently=False)
+        except Exception:
+            logger.exception('No se pudo enviar el correo "%s"', asunto)
+    threading.Thread(target=enviar, daemon=True).start()
+
 
 @csrf_exempt
 def registrar_usuario(request):
@@ -246,10 +275,7 @@ def registrar_usuario(request):
             if not all([username, password, email]):
                 return JsonResponse({'error': 'Faltan datos'}, status=400)
 
-            if User.objects.filter(email=email).exists():
-                return JsonResponse({'error': 'Correo ya registrado'}, status=400)
-
-            if User.objects.filter(username=username).exists():
+            if User.objects.filter(username__iexact=username).exists():
                 return JsonResponse({'error': 'Ese nombre de usuario ya existe'}, status=400)
 
             try:
@@ -257,14 +283,26 @@ def registrar_usuario(request):
             except ValidationError as errores:
                 return JsonResponse({'error': ' '.join(errores.messages)}, status=400)
 
+            # Un correo ya registrado recibe la misma respuesta que uno nuevo, para no revelar quién es cliente;
+            # al dueño del correo se le avisa por mensaje
+            if User.objects.filter(email__iexact=email).exists():
+                make_password(password)
+                _enviar_en_segundo_plano(
+                    'Intento de registro con tu correo',
+                    'Alguien intentó crear una cuenta en Pixel App Store con este correo, que ya tiene una. '
+                    'Si fuiste tú, ingresa con tu usuario o recupera tu clave. Si no, ignora este mensaje.',
+                    email,
+                )
+                return JsonResponse({'mensaje': 'Cliente registrado'})
+
             user = User.objects.create_user(
                 username=username, password=password, email=email,
                 first_name=nombre, last_name=apellido
             )
-            return JsonResponse({'mensaje': 'Cliente registrado', 'id': user.id})
+            return JsonResponse({'mensaje': 'Cliente registrado'})
 
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
 # ---------------------------------------------------------
@@ -276,16 +314,21 @@ def solicitar_recuperacion(request):
         try:
             data = json.loads(request.body)
             email = data.get('email')
-            user = User.objects.filter(email=email).first()
+            user = User.objects.filter(email__iexact=str(email or '')).first()
             if user:
                 token = default_token_generator.make_token(user)
                 uid = urlsafe_base64_encode(force_bytes(user.pk))
-                try:
-                    send_mail("Recuperar Clave", f"UID: {uid}\nTOKEN: {token}", settings.EMAIL_HOST_USER, [email], fail_silently=False)
-                except: pass
+                enlace = f"{settings.FRONTEND_URL}/recuperar/confirmar?uid={uid}&token={token}"
+                _enviar_en_segundo_plano(
+                    "Recupera tu contraseña",
+                    f"Hola {user.first_name or user.username},\n\n"
+                    f"Para elegir una contraseña nueva entra a este enlace (vale 1 hora):\n{enlace}\n\n"
+                    "Si no lo pediste tú, ignora este mensaje: tu contraseña sigue igual.",
+                    user.email,
+                )
             return JsonResponse({'mensaje': 'Si existe, se envió correo.'})
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
     return JsonResponse({'error': '405'}, status=405)
 
 @csrf_exempt
@@ -296,10 +339,15 @@ def confirmar_cambio_password(request):
             uid = force_str(urlsafe_base64_decode(data.get('uid')))
             user = User.objects.get(pk=uid)
             if default_token_generator.check_token(user, data.get('token')):
-                user.set_password(data.get('new_password'))
+                nueva = str(data.get('new_password') or '')
+                try:
+                    validate_password(nueva, user=user)
+                except ValidationError as errores:
+                    return JsonResponse({'error': ' '.join(errores.messages)}, status=400)
+                user.set_password(nueva)
                 user.save()
                 return JsonResponse({'mensaje': 'Clave cambiada'})
-            return JsonResponse({'error': 'Token inválido'}, status=400)
+            return JsonResponse({'error': 'El enlace no es válido o ya venció'}, status=400)
         except Exception:
             return JsonResponse({'error': 'Error procesando solicitud'}, status=400)
     return JsonResponse({'error': '405'}, status=405)
@@ -319,8 +367,14 @@ def crear_empleado(request):
             email = data.get('email')
             nombre = data.get('nombre')
             
-            if User.objects.filter(username=username).exists():
+            if not all([username, password, email]):
+                return JsonResponse({'error': 'Faltan datos: usuario, correo y contraseña son obligatorios'}, status=400)
+            if User.objects.filter(username__iexact=username).exists():
                 return JsonResponse({'error': 'Usuario ya existe'}, status=400)
+            try:
+                validate_password(password, user=User(username=username, email=email))
+            except ValidationError as errores:
+                return JsonResponse({'error': ' '.join(errores.messages)}, status=400)
 
             empleado = User.objects.create_user(
                 username=username, password=password, email=email, first_name=nombre
@@ -333,7 +387,7 @@ def crear_empleado(request):
             return JsonResponse({'mensaje': 'Vendedor creado exitosamente', 'id': empleado.id})
 
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
 def listar_empleados(request):
@@ -354,10 +408,16 @@ def editar_empleado(request, empleado_id):
             emp = User.objects.get(id=empleado_id)
             if emp.is_superuser:
                 return JsonResponse({'error': 'No puedes editar al Admin principal aquí'}, status=400)
-            if 'first_name' in data: emp.first_name = data['first_name']
-            if 'email' in data: emp.email = data['email']
-            if 'is_active' in data: emp.is_active = data['is_active']
+            if not emp.is_staff:
+                return JsonResponse({'error': 'Empleado no encontrado'}, status=404)
+            if 'first_name' in data: emp.first_name = str(data['first_name'])[:150]
+            if 'email' in data: emp.email = str(data['email'])[:254]
+            if 'is_active' in data:
+                if not isinstance(data['is_active'], bool):
+                    return JsonResponse({'error': 'Dato inválido'}, status=400)
+                emp.is_active = data['is_active']
             emp.save()
+            AuditLog.objects.create(usuario=request.user, accion="Editar empleado", detalle=f"{emp.username}: activo={emp.is_active}")
             return JsonResponse({'mensaje': 'Datos del vendedor actualizados'})
         except User.DoesNotExist:
             return JsonResponse({'error': 'Empleado no encontrado'}, status=404)

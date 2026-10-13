@@ -40,6 +40,8 @@ class Cupon(models.Model):
     descuento_porcentaje = models.IntegerField(help_text="Porcentaje de descuento (0-100)")
     fecha_expiracion = models.DateTimeField()
     activo = models.BooleanField(default=True)
+    usos_maximos = models.IntegerField(null=True, blank=True, help_text="Total de usos permitidos entre todos los clientes; vacío = sin tope")
+    usos_por_usuario = models.IntegerField(null=True, blank=True, default=1, help_text="Cuántas veces puede usarlo cada cliente; vacío = sin tope")
 
     def __str__(self):
         return f"{self.codigo} ({self.descuento_porcentaje}%)"
@@ -52,6 +54,14 @@ class Venta(models.Model):
     
     region = models.CharField(max_length=100, default='RM')
     costo_envio = models.IntegerField(default=0)
+
+    direccion_nombre = models.CharField(max_length=100, blank=True, default='')
+    direccion_telefono = models.CharField(max_length=30, blank=True, default='')
+    direccion_calle = models.CharField(max_length=150, blank=True, default='')
+    direccion_numero = models.CharField(max_length=20, blank=True, default='')
+    direccion_complemento = models.CharField(max_length=60, blank=True, default='')
+    direccion_comuna = models.CharField(max_length=80, blank=True, default='')
+    direccion_indicaciones = models.CharField(max_length=255, blank=True, default='')
     
     cupon_usado = models.CharField(max_length=50, null=True, blank=True)
     descuento_aplicado = models.IntegerField(default=0)
@@ -177,3 +187,18 @@ def registrar_cambio_estado_create(sender, instance, created, **kwargs):
             estado_nuevo=instance.estado,
             fecha_cambio=timezone.now()
         )
+
+class PerfilCliente(models.Model):
+    """ Datos de contacto y entrega que el cliente guarda para no repetirlos en cada compra """
+    user = models.OneToOneField(User, related_name='perfil_cliente', on_delete=models.CASCADE)
+    region = models.CharField(max_length=100, default='RM')
+    direccion_nombre = models.CharField(max_length=100, blank=True, default='')
+    direccion_telefono = models.CharField(max_length=30, blank=True, default='')
+    direccion_calle = models.CharField(max_length=150, blank=True, default='')
+    direccion_numero = models.CharField(max_length=20, blank=True, default='')
+    direccion_complemento = models.CharField(max_length=60, blank=True, default='')
+    direccion_comuna = models.CharField(max_length=80, blank=True, default='')
+    direccion_indicaciones = models.CharField(max_length=255, blank=True, default='')
+
+    def __str__(self):
+        return f"Perfil de {self.user.username}"

@@ -37,6 +37,17 @@ Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `
 - **`productos/eliminar-todos` y `reemplazar`** fallan con 500 en cuanto existan ventas (`DetalleVenta.producto` es `PROTECT`) y `reemplazar` no restaura imágenes.
 - ✅ *Corregido 12-10-2026:* **Descuento de stock sin bloqueo** en `confirmar_pago` (condición de carrera entre dos pagos simultáneos); el POS sí usa `select_for_update`.
 - ✅ *Corregido 12-10-2026:* `iniciar_pago` devolvía `None` (500) si el método no era POST; ahora responde 405.
+- ✅ *Revisado 13-10-2026:* **Inyección SQL.** No hay SQL crudo en el backend (sin `raw`, `extra`, `cursor` ni `RawSQL`): todo pasa por el ORM, que parametriza. Se probaron 6 cargas típicas (`' OR '1'='1`, `; DROP TABLE`, `UNION SELECT`, etc.) en 10 entradas (búsqueda, filtros, login, registro, cupón, carrito) y no hubo efecto sobre los datos.
+- ✅ *Corregido 13-10-2026:* **500 con datos mal formados.** `productos/listar` con `categoria`, `precio_min` o `precio_max` no numéricos y `carrito/agregar` con `producto_id` inválido fallaban con 500 (y `agregar` devolvía el texto de la excepción). Ahora responden 400 con un mensaje fijo.
+- ✅ *Corregido 13-10-2026:* **Texto de excepciones en las respuestas.** 14 vistas devolvían `str(e)` (podía filtrar nombres de tablas o campos); ahora usan `error_interno`.
+- ✅ *Corregido 13-10-2026:* **Sin límite por IP** en login, código 2FA, registro, recuperación, cupones y `webpay/iniciar` (ver [[04_Autenticacion_y_Seguridad]]). El endurecimiento de cookies y HTTPS se activa con `DEBUG=False`.
+- ✅ *Corregido 13-10-2026:* cuentas distinguibles por el 403 de bloqueo (ahora respuesta idéntica y tiempo parecido), bloqueo fijo de 5 min (ahora progresivo hasta 60), contador de límites en la memoria de un solo proceso (ahora caché en archivos) y JWT siempre presentes en la respuesta del login (ahora opcionales con `jwt: true`).
+- ✅ *Corregido 13-10-2026:* `auth/registro` revelaba si un correo estaba registrado (ahora respuesta idéntica y aviso por correo al dueño) y no había captcha (ahora Turnstile; ver [[04_Autenticacion_y_Seguridad]]).
+- ✅ *Corregido 13-10-2026:* `auth/recuperar-confirmar` aceptaba claves débiles y el correo de recuperación no traía un enlace; ahora valida la clave y envía un enlace que vale 1 hora, con pantalla en el frontend.
+- ✅ *Corregido 13-10-2026:* **Cualquier staff podía borrar usuarios** (incluidos otros staff y administradores salvo el ID 1): ahora solo el superusuario, solo clientes y sin poder borrarse a sí mismo.
+- ✅ *Corregido 13-10-2026:* **Panel de Django sin 2FA en una dirección conocida (`/admin/`)**: apagado por defecto y, si se activa, bajo la ruta secreta.
+- ✅ *Corregido 13-10-2026:* `productos/crear` y `editar` aceptaban precios o stock negativos o no numéricos; `crear_empleado` aceptaba claves débiles; el POS devolvía un error genérico en vez de "Stock insuficiente" tras mi cambio de errores internos.
+- ⚠️ *Pendiente 13-10-2026:* `DEBUG=True` en el `.env` de desarrollo (a propósito, mientras se trabaja); el nombre de usuario ocupado sigue informándose; con varios servidores hace falta una caché externa para los límites; para producción hay que crear las claves reales de Turnstile; el correo de recuperación depende de que el Gmail esté configurado (aún no lo está).
 
 ## 4. Medios
 
@@ -56,7 +67,7 @@ Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `
 
 - **Cero tests** (`gestion/tests.py` vacío).
 - ✅ *Creado 12-10-2026* `ecommerce_backend/requirements.txt` (sin versiones fijadas). El `readme.txt` sigue sin listar todas las dependencias.
-- Sin paginación en listados (`productos/listar`, `ventas/historial`) y consultas N+1 al listar imágenes/valoraciones/detalles.
+- Sin paginación en listados (`productos/listar`, `ventas/historial`; el catálogo del frontend filtra y pagina en el cliente, y el filtro `q` de `productos/listar` se hace en Python, no en SQL: con miles de productos habría que paginar e indexar en el servidor) y consultas N+1 al listar imágenes/valoraciones/detalles.
 - Sin DEFAULT_PERMISSION_CLASSES ni capa de autorización reutilizable: cada vista repite `if not request.user.is_staff`.
 - ✅ *Verificado 12-10-2026:* migraciones coinciden con los modelos y `manage.py check` no reporta problemas.
 
@@ -69,6 +80,10 @@ Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `
 | "Python 3.10+" | Los settings fueron generados con Django 6.0.1; esa versión exige Python más nuevo (**no verificado**, revisar). |
 | "Carga de fixtures con `loaddata`" | `usuarios.json` no tiene formato de fixture Django; se usa vía endpoint. |
 | "Diferencié roles" | Solo en dashboard/empleados; el catálogo y el POS están abiertos (C2). |
+
+## Datos de demostración (13-10-2026)
+
+La base local tiene datos inventados para probar el frontend: productos PX-101 a PX-200 (precios y stock ficticios), 325 valoraciones falsas y los usuarios `cliente_demo1` a `cliente_demo8` (sin contraseña utilizable). Las valoraciones no pasan por la regla "solo si compró". **Antes de una entrega o uso real hay que borrar esos usuarios y sus valoraciones** (las valoraciones caen en cascada al borrar el usuario). Hay copias de seguridad de la base en la carpeta temporal de la sesión de trabajo, no en el repositorio.
 
 ## 7. Orden de arreglo sugerido
 

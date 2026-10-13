@@ -1,8 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
-import api, { formatoCLP, mensajeError } from '../api'
-import { Estrellas } from '../components/ProductCard'
+import api, { formatoCLP, mensajeError, PASIVO } from '../api'
+import Icono from '../components/Icono'
+import ProductCard, { Estrellas } from '../components/ProductCard'
 import { useAuth, useCarrito } from '../contexto/auth'
+import useRefrescoPeriodico from '../useRefrescoPeriodico'
+
+const BENEFICIOS = [
+  { icono: 'camion', titulo: 'Despacho a todo Chile', texto: 'Se calcula según tu región al pagar' },
+  { icono: 'candado', titulo: 'Pago seguro', texto: 'Con tarjeta a través de Webpay' },
+  { icono: 'check', titulo: 'Precio final', texto: 'Incluye IVA (19%)' },
+]
 
 function ProductPage() {
   const { id } = useParams()
@@ -16,23 +24,40 @@ function ProductPage() {
   const [unidades, setUnidades] = useState(1)
   const [mensaje, setMensaje] = useState(null)
   const [enviando, setEnviando] = useState(false)
+  const [agregado, setAgregado] = useState(false)
 
-  useEffect(() => {
-    let vigente = true
-    Promise.all([
-      api.get('productos/listar'),
-      api.get(`productos/relacionados/${id}`).catch(() => ({ data: { relacionados: [] } })),
-    ])
-      .then(([listado, relacionados]) => {
-        if (!vigente) return
-        const producto = listado.data.productos.find((p) => String(p.id) === id) || null
-        setEstado({ cargando: false, producto, relacionados: relacionados.data.relacionados })
+  const idVigente = useRef(id)
+
+  const cargar = useCallback((silencioso) => {
+    idVigente.current = id
+    return api.get('productos/listar', silencioso ? PASIVO : undefined)
+      .then(({ data }) => {
+        if (idVigente.current !== id) return
+        const producto = data.productos.find((p) => String(p.id) === id) || null
+        const relacionados = producto
+          ? data.productos
+            .filter((p) => p.categoria_id === producto.categoria_id && p.id !== producto.id && p.disponible > 0)
+            .sort((a, b) => b.calificacion_promedio - a.calificacion_promedio)
+            .slice(0, 4)
+          : []
+        setEstado({ cargando: false, producto, relacionados })
       })
       .catch(() => {
-        if (vigente) setEstado({ cargando: false, producto: null, relacionados: [] })
+        if (!silencioso && idVigente.current === id) setEstado({ cargando: false, producto: null, relacionados: [] })
       })
-    return () => { vigente = false }
   }, [id])
+
+  useEffect(() => {
+    cargar(false)
+  }, [cargar])
+
+  useRefrescoPeriodico(() => cargar(true))
+
+  useEffect(() => {
+    if (!agregado) return undefined
+    const temporizador = setTimeout(() => setAgregado(false), 1800)
+    return () => clearTimeout(temporizador)
+  }, [agregado])
 
   const { cargando, producto, relacionados } = estado
 
@@ -40,10 +65,13 @@ function ProductPage() {
   if (!producto) {
     return (
       <div className="contenedor">
-        <p className="vacio">Producto no encontrado. <Link to="/">Volver al catálogo</Link></p>
+        <p className="vacio">Producto no encontrado. <Link to="/catalogo">Volver al catálogo</Link></p>
       </div>
     )
   }
+
+  const cantidad = Math.min(unidades, Math.max(producto.disponible, 1))
+  const cambiarUnidades = (valor) => setUnidades(Math.min(producto.disponible, Math.max(1, valor || 1)))
 
   const comprar = async (irAlCarrito) => {
     if (!usuario) {
@@ -53,9 +81,9 @@ function ProductPage() {
     setEnviando(true)
     setMensaje(null)
     try {
-      await agregar(producto.id, unidades)
+      await agregar(producto.id, cantidad)
       if (irAlCarrito) navigate('/carrito')
-      else setMensaje({ tipo: 'ok', texto: 'Producto agregado al carrito' })
+      else setAgregado(true)
     } catch (error) {
       setMensaje({ tipo: 'error', texto: mensajeError(error) })
     } finally {
@@ -63,86 +91,143 @@ function ProductPage() {
     }
   }
 
+  const pocasUnidades = producto.disponible > 0 && producto.disponible <= 5
+  const reservado = producto.disponible <= 0 && producto.stock > 0
+
   return (
     <div className="contenedor">
-      <p className="nota"><Link to="/">Inicio</Link> / {producto.categoria}</p>
-      <div className="tarjeta detalle">
-        <div>
-          <div className="galeria-principal">
+      <nav className="migas" aria-label="Ruta">
+        <Link to="/">Inicio</Link>
+        <span className="migas-sep">/</span>
+        <Link to={`/catalogo?categoria=${producto.categoria_id}`}>{producto.categoria}</Link>
+        <span className="migas-sep">/</span>
+        <span>{producto.nombre}</span>
+      </nav>
+
+      <div className="ficha">
+        <div className="ficha-galeria">
+          <div className="ficha-imagen">
+            <span className="ficha-categoria">{producto.categoria}</span>
             {producto.imagenes.length > 0 ? (
-              <img src={producto.imagenes[imagenActiva]} alt={producto.nombre} />
+              <img key={imagenActiva} src={producto.imagenes[imagenActiva]} alt={producto.nombre} />
             ) : (
               <span className="nota">Sin imagen</span>
             )}
           </div>
           {producto.imagenes.length > 1 && (
-            <div className="miniaturas">
+            <div className="ficha-miniaturas">
               {producto.imagenes.map((url, indice) => (
-                <img
+                <button
+                  type="button"
                   key={url}
-                  src={url}
-                  alt={`Vista ${indice + 1}`}
                   className={indice === imagenActiva ? 'activa' : ''}
                   onClick={() => setImagenActiva(indice)}
-                />
+                  aria-label={`Ver imagen ${indice + 1}`}
+                >
+                  <img src={url} alt="" />
+                </button>
               ))}
             </div>
           )}
         </div>
 
-        <div>
-          {producto.marca && <span className="producto-marca">{producto.marca}</span>}
+        <div className="ficha-info">
+          {producto.marca && <span className="ficha-marca">{producto.marca}</span>}
           <h1>{producto.nombre}</h1>
-          <Estrellas promedio={producto.calificacion_promedio} total={producto.total_reviews} />
-          <p className="precio">{formatoCLP(producto.precio)}</p>
-          {producto.descripcion && <p>{producto.descripcion}</p>}
-          <p className="nota">Código: {producto.codigo}</p>
+          <div className="ficha-valoracion">
+            <Estrellas promedio={producto.calificacion_promedio} total={producto.total_reviews} />
+            <span className="nota">{producto.total_reviews === 1 ? '1 valoración' : `${producto.total_reviews} valoraciones`}</span>
+          </div>
 
-          {producto.stock > 0 ? (
+          <div className="ficha-precio">
+            <span className="precio">{formatoCLP(producto.precio)}</span>
+            <small>Incluye IVA</small>
+          </div>
+
+          {producto.descripcion && <p className="ficha-descripcion">{producto.descripcion}</p>}
+
+          {producto.disponible > 0 ? (
             <>
-              <p className="nota">{producto.stock} unidades disponibles</p>
-              <div className="fila-cantidad">
-                <label htmlFor="unidades">Cantidad</label>
-                <input
-                  id="unidades"
-                  type="number"
-                  min="1"
-                  max={producto.stock}
-                  value={unidades}
-                  onChange={(e) => setUnidades(Math.min(producto.stock, Math.max(1, Number(e.target.value) || 1)))}
-                />
+              <div className={pocasUnidades ? 'ficha-stock pocas' : 'ficha-stock'}>
+                <span className="ficha-punto" />
+                {pocasUnidades ? `Quedan solo ${producto.disponible} unidades` : `${producto.disponible} unidades disponibles`}
               </div>
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                <button className="boton secundario" onClick={() => comprar(false)} disabled={enviando}>
-                  Agregar al carrito
+
+              <div className="ficha-compra">
+                <div className="ficha-cantidad" role="group" aria-label="Cantidad">
+                  <button type="button" onClick={() => cambiarUnidades(cantidad - 1)} disabled={cantidad <= 1} aria-label="Restar una unidad">-</button>
+                  <input
+                    type="number"
+                    min="1"
+                    max={producto.disponible}
+                    value={cantidad}
+                    onChange={(e) => cambiarUnidades(Number(e.target.value))}
+                    aria-label="Cantidad"
+                  />
+                  <button type="button" onClick={() => cambiarUnidades(cantidad + 1)} disabled={cantidad >= producto.disponible} aria-label="Sumar una unidad">+</button>
+                </div>
+                <div className="ficha-subtotal">
+                  <small>Subtotal</small>
+                  <strong>{formatoCLP(producto.precio * cantidad)}</strong>
+                </div>
+              </div>
+
+              <div className="ficha-botones">
+                <button className={agregado ? 'ficha-agregar agregado' : 'ficha-agregar'} onClick={() => comprar(false)} disabled={enviando}>
+                  {agregado ? (
+                    <span className="agregado-contenido"><Icono nombre="check" tamano={20} /> Agregado</span>
+                  ) : enviando ? 'Agregando...' : 'Agregar al carrito'}
                 </button>
-                <button className="boton" onClick={() => comprar(true)} disabled={enviando}>
+                <button className="ficha-comprar" onClick={() => comprar(true)} disabled={enviando}>
                   Comprar ahora
                 </button>
               </div>
             </>
           ) : (
-            <p className="sin-stock">Sin stock</p>
+            <div className="ficha-agotado">
+              <Icono nombre="alerta" tamano={24} />
+              {reservado ? (
+                <span><strong>Reservado por otros clientes</strong><small>Están pagando las últimas unidades. Si no completan el pago, se liberan en unos minutos.</small></span>
+              ) : (
+                <span><strong>Sin stock por ahora</strong><small>Vuelve a revisar pronto o mira productos similares más abajo.</small></span>
+              )}
+            </div>
           )}
-          {mensaje && <div className={`aviso ${mensaje.tipo}`} style={{ marginTop: 12 }}>{mensaje.texto}</div>}
+          {mensaje && (
+            <div className="ficha-mensaje" role="alert">
+              <span className="ficha-mensaje-icono"><Icono nombre="alerta" tamano={22} /></span>
+              <span>
+                <strong>{mensaje.texto.split('.')[0]}</strong>
+                {mensaje.texto.includes('.') && mensaje.texto.split('.').slice(1).join('.').trim() && (
+                  <small>{mensaje.texto.split('.').slice(1).join('.').trim()}</small>
+                )}
+              </span>
+              <button type="button" onClick={() => setMensaje(null)} aria-label="Cerrar aviso">x</button>
+            </div>
+          )}
+
+          <ul className="ficha-beneficios">
+            {BENEFICIOS.map((b) => (
+              <li key={b.titulo}>
+                <span className="ficha-beneficio-icono"><Icono nombre={b.icono} tamano={20} /></span>
+                <span><strong>{b.titulo}</strong><small>{b.texto}</small></span>
+              </li>
+            ))}
+          </ul>
+          <p className="ficha-codigo">Código de producto: {producto.codigo}</p>
         </div>
       </div>
 
       {relacionados.length > 0 && (
-        <>
-          <h2 style={{ marginTop: 32 }}>Productos relacionados</h2>
-          <div className="cuadricula">
-            {relacionados.map((r) => (
-              <Link key={r.id} to={`/producto/${r.id}`} className="producto-card">
-                <div className="producto-imagen">
-                  {r.imagen ? <img src={r.imagen} alt={r.nombre} /> : <span className="nota">Sin imagen</span>}
-                </div>
-                <span className="producto-nombre">{r.nombre}</span>
-                <span className="precio">{formatoCLP(r.precio)}</span>
-              </Link>
-            ))}
+        <section className="ficha-relacionados">
+          <div className="ficha-relacionados-cabecera">
+            <h2>Otros productos de {producto.categoria}</h2>
+            <Link to={`/catalogo?categoria=${producto.categoria_id}&orden=valorados`}>Ver más</Link>
           </div>
-        </>
+          <div className="cuadricula cuadricula-catalogo">
+            {relacionados.map((r) => <ProductCard key={r.id} producto={r} />)}
+          </div>
+        </section>
       )}
     </div>
   )

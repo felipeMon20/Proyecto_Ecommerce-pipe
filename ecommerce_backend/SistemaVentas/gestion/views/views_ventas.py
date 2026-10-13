@@ -1,10 +1,19 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from ..models import Producto, Venta, DetalleVenta, Carrito, ItemCarrito, HistorialEstadoVenta
+from ..errores import error_interno
 from ..permisos import requiere_staff
+from ..cupones import validar_cupon
+from .views_panel import auditar
+from ..reservas import mensaje_sin_disponible, reservas_por_producto, stock_reservado
 import json
+
+
+class ErrorVenta(Exception):
+    """ Mensaje pensado para mostrarse al vendedor """
 
 # ----------------------------------------------------
 #  SECCIÓN 1: GESTIÓN DE CARRITO (ID 6)
@@ -30,14 +39,21 @@ def agregar_carrito(request):
             if prod.stock < cantidad:
                 return JsonResponse({'error': 'No hay suficiente stock'}, status=400)
 
+            reservado = stock_reservado(prod.id, request.user)
+            disponible = prod.stock - reservado
+
             item, item_created = ItemCarrito.objects.get_or_create(
-                carrito=carrito, 
+                carrito=carrito,
                 producto=prod,
                 defaults={'cantidad': 0}
             )
 
             item.cantidad += cantidad
-            if prod.stock < item.cantidad:
+            if disponible < item.cantidad:
+                if item_created:
+                    item.delete()
+                if reservado:
+                    return JsonResponse({'error': mensaje_sin_disponible(prod.nombre, disponible)}, status=400)
                 return JsonResponse({'error': f'Stock insuficiente. Máximo: {prod.stock}'}, status=400)
 
             item.save()
@@ -49,8 +65,10 @@ def agregar_carrito(request):
 
         except Producto.DoesNotExist:
             return JsonResponse({'error': 'Producto no encontrado'}, status=404)
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+        except (TypeError, ValueError):
+            return JsonResponse({'error': 'Datos inválidos'}, status=400)
+        except Exception:
+            return JsonResponse({'error': 'No se pudo agregar el producto'}, status=500)
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
 @csrf_exempt
@@ -62,6 +80,7 @@ def ver_carrito(request):
         try:
             carrito = Carrito.objects.get(usuario=request.user)
             items = carrito.items.all()
+            reservas = reservas_por_producto(request.user)
             lista_items = []
             total_estimado = 0
 
@@ -77,6 +96,8 @@ def ver_carrito(request):
                     'precio': i.producto.precio,
                     'cantidad': i.cantidad,
                     'subtotal': subtotal,
+                    'stock': i.producto.stock,
+                    'disponible': max(i.producto.stock - reservas.get(i.producto.id, 0), 0),
                     'imagen': foto
                 })
 
@@ -98,6 +119,48 @@ def eliminar_item_carrito(request, item_id):
         except ItemCarrito.DoesNotExist:
             return JsonResponse({'error': 'Item no encontrado'}, status=404)
     return JsonResponse({'error': 'Método no permitido'}, status=405)
+
+@csrf_exempt
+def restar_item_carrito(request, item_id):
+    if request.method == 'POST':
+        if not request.user.is_authenticated:
+            return JsonResponse({'error': 'Debes iniciar sesión'}, status=401)
+        items = ItemCarrito.objects.filter(id=item_id, carrito__usuario=request.user)
+        if not items.exists():
+            return JsonResponse({'error': 'Item no encontrado'}, status=404)
+
+        # La resta es atómica: con clics repetidos nunca baja de 1 unidad
+        actualizados = items.filter(cantidad__gt=1).update(cantidad=F('cantidad') - 1)
+        if not actualizados:
+            return JsonResponse({'error': 'Debe quedar al menos una unidad. Usa Quitar para eliminar el producto.'}, status=400)
+
+        return JsonResponse({'mensaje': 'Unidad descartada', 'cantidad': items.first().cantidad})
+    return JsonResponse({'error': 'Método no permitido'}, status=405)
+
+@csrf_exempt
+def previsualizar_cupon(request):
+    """ Calcula el descuento de un cupón sobre el carrito del usuario, sin usarlo """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Método no permitido'}, status=405)
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'Debes iniciar sesión'}, status=401)
+    try:
+        data = json.loads(request.body)
+    except ValueError:
+        return JsonResponse({'error': 'JSON inválido'}, status=400)
+
+    carrito = Carrito.objects.filter(usuario=request.user).first()
+    total = sum(i.producto.precio * i.cantidad for i in carrito.items.select_related('producto')) if carrito else 0
+
+    cupon, descuento, error = validar_cupon(data.get('codigo'), request.user, total)
+    if error:
+        return JsonResponse({'error': error}, status=400)
+    return JsonResponse({
+        'codigo': cupon.codigo,
+        'porcentaje': min(max(cupon.descuento_porcentaje, 0), 100),
+        'descuento': descuento,
+    })
+
 
 @csrf_exempt
 def vaciar_carrito(request):
@@ -172,13 +235,13 @@ def registrar_venta(request):
                     prod_id = item.get('producto_id')
                     cantidad = item.get('cantidad')
 
-                    if not prod_id or not cantidad or cantidad <= 0:
-                        raise Exception(f"Datos inválidos en el item: {item}")
+                    if not prod_id or not isinstance(cantidad, int) or cantidad <= 0:
+                        raise ErrorVenta('Hay un producto con datos inválidos')
 
                     producto = Producto.objects.select_for_update().get(id=prod_id)
 
                     if producto.stock < cantidad:
-                        raise Exception(f"Stock insuficiente para '{producto.nombre}'")
+                        raise ErrorVenta(f"Stock insuficiente para '{producto.nombre}' (quedan {producto.stock})")
 
                     producto.stock -= cantidad
                     producto.save()
@@ -197,6 +260,7 @@ def registrar_venta(request):
                 nueva_venta.total = total_acumulado
                 nueva_venta.save()
 
+            auditar(request, 'Venta de mostrador', f'Venta #{nueva_venta.id} por ${total_acumulado}')
             return JsonResponse({
                 'mensaje': 'Venta registrada exitosamente',
                 'id_venta': nueva_venta.id,
@@ -205,8 +269,10 @@ def registrar_venta(request):
 
         except Producto.DoesNotExist:
             return JsonResponse({'error': 'Uno de los productos no existe'}, status=404)
-        except Exception as e:
+        except ErrorVenta as e:
             return JsonResponse({'error': str(e)}, status=400)
+        except Exception as e:
+            return error_interno(400)
 
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
@@ -250,7 +316,7 @@ def cancelar_compra(request, venta_id):
         except Venta.DoesNotExist:
             return JsonResponse({'error': 'Venta no encontrada'}, status=404)
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
 
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
@@ -290,6 +356,23 @@ def _formatear_respuesta_ventas(ventas_queryset):
             'tipo_operacion': rol_transaccion,   # <--- NUEVO CAMPO
             'responsable': responsable_nombre,   # <--- AHORA MUESTRA NOMBRE REAL
             'email_contacto': responsable_email, # <--- CORREO DEL VENDEDOR/CLIENTE
-            'items': detalles
+            'items': detalles,
+            'historial': [
+                {'estado': h.estado_nuevo, 'fecha': h.fecha_cambio.strftime("%Y-%m-%d %H:%M")}
+                for h in v.historial_estados.order_by('fecha_cambio', 'id')
+            ],
+            'envio': v.costo_envio,
+            'descuento': v.descuento_aplicado,
+            'cupon': v.cupon_usado,
+            'region': v.region,
+            'direccion': {
+                'nombre': v.direccion_nombre,
+                'telefono': v.direccion_telefono,
+                'calle': v.direccion_calle,
+                'numero': v.direccion_numero,
+                'complemento': v.direccion_complemento,
+                'comuna': v.direccion_comuna,
+                'indicaciones': v.direccion_indicaciones,
+            },
         })
     return JsonResponse({'ventas': resultado}, safe=False)

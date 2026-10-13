@@ -9,9 +9,16 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       window.dispatchEvent(new Event('sesion-expirada'))
     }
+    // El servidor pide frenar (recargas seguidas o demasiada gente): se muestra la pantalla de espera
+    if (error.response?.status === 429 && error.response.data?.saturacion) {
+      window.dispatchEvent(new CustomEvent('saturacion', { detail: error.response.data }))
+    }
     return Promise.reject(error)
   },
 )
+
+// Consultas automáticas: no cuentan como actividad del usuario para la expiración de la sesión
+export const PASIVO = { headers: { 'X-Actividad-Pasiva': '1' } }
 
 export function mensajeError(error, porDefecto = 'Ocurrió un error. Intenta de nuevo.') {
   if (!error.response) return 'No hay conexión con el servidor. ¿Está encendido el backend?'

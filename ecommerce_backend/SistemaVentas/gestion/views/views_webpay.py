@@ -17,7 +17,9 @@ from transbank.common.options import WebpayOptions
 from transbank.common.integration_commerce_codes import IntegrationCommerceCodes
 from transbank.common.integration_api_keys import IntegrationApiKeys
 from transbank.common.integration_type import IntegrationType
-from ..models import Producto, Venta, DetalleVenta, Cupon, ItemCarrito, AuditLog
+from ..models import Producto, Venta, DetalleVenta, ItemCarrito, AuditLog
+from ..cupones import validar_cupon
+from ..reservas import mensaje_sin_disponible, reservas_por_producto
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,39 @@ def _cambiar_estado(venta, estado):
     venta.save(update_fields=['estado'])
 
 
+CAMPOS_DIRECCION = [
+    # clave del body, campo de Venta, etiqueta, largo máximo, obligatorio
+    ('nombre', 'direccion_nombre', 'el nombre de quien recibe', 100, True),
+    ('telefono', 'direccion_telefono', 'el teléfono de contacto', 30, True),
+    ('calle', 'direccion_calle', 'la calle', 150, True),
+    ('numero', 'direccion_numero', 'el número', 20, True),
+    ('complemento', 'direccion_complemento', 'el departamento o casa', 60, False),
+    ('comuna', 'direccion_comuna', 'la comuna', 80, True),
+    ('indicaciones', 'direccion_indicaciones', 'las indicaciones', 255, False),
+]
+
+
+def _leer_direccion(data):
+    """ Valida la dirección de entrega y devuelve (campos_de_venta, error) """
+    direccion = data.get('direccion')
+    if not isinstance(direccion, dict):
+        return None, 'Falta la dirección de entrega'
+
+    campos = {}
+    for clave, campo, etiqueta, largo, obligatorio in CAMPOS_DIRECCION:
+        valor = ' '.join(str(direccion.get(clave) or '').split())
+        if obligatorio and not valor:
+            return None, f'Falta {etiqueta}'
+        if len(valor) > largo:
+            return None, f'Es demasiado largo {etiqueta}'
+        campos[campo] = valor
+
+    digitos = [c for c in campos['direccion_telefono'] if c.isdigit()]
+    if len(digitos) < 8 or len(digitos) > 12:
+        return None, 'El teléfono de contacto no es válido'
+    return campos, None
+
+
 @csrf_exempt
 def iniciar_pago(request):
     """ Crea la venta pendiente y la sesión de pago en Webpay """
@@ -68,6 +103,10 @@ def iniciar_pago(request):
     if not items:
         return JsonResponse({'error': 'El carrito está vacío'}, status=400)
 
+    campos_direccion, error_direccion = _leer_direccion(data)
+    if error_direccion:
+        return JsonResponse({'error': error_direccion}, status=400)
+
     total_productos = 0
     productos_a_comprar = []
     acumulado = {}
@@ -85,8 +124,6 @@ def iniciar_pago(request):
             return JsonResponse({'error': 'La cantidad debe ser mayor a 0'}, status=400)
 
         acumulado[prod.pk] = acumulado.get(prod.pk, 0) + cantidad
-        if prod.stock < acumulado[prod.pk]:
-            return JsonResponse({'error': f'Stock insuficiente para {prod.nombre}'}, status=400)
 
         subtotal = prod.precio * cantidad
         total_productos += subtotal
@@ -96,14 +133,9 @@ def iniciar_pago(request):
     nombre_cupon = None
 
     if codigo_cupon:
-        try:
-            cupon_bd = Cupon.objects.get(codigo=codigo_cupon, activo=True)
-        except Cupon.DoesNotExist:
-            return JsonResponse({'error': 'Cupón inválido'}, status=400)
-        if cupon_bd.fecha_expiracion < timezone.now():
-            return JsonResponse({'error': 'El cupón ha expirado'}, status=400)
-        porcentaje = min(max(cupon_bd.descuento_porcentaje, 0), 100)
-        descuento_dinero = int(total_productos * (porcentaje / 100))
+        cupon_bd, descuento_dinero, error_cupon = validar_cupon(codigo_cupon, request.user, total_productos)
+        if error_cupon:
+            return JsonResponse({'error': error_cupon}, status=400)
         nombre_cupon = cupon_bd.codigo
 
     en_rm = region_cliente.upper() == 'RM' or region_cliente.lower() == 'metropolitana'
@@ -112,6 +144,17 @@ def iniciar_pago(request):
 
     try:
         with transaction.atomic():
+            # Con los productos bloqueados se revisa y se aparta el stock sin que otro pago se cuele
+            bloqueados = {p.pk: p for p in Producto.objects.select_for_update().filter(pk__in=list(acumulado))}
+            reservas = reservas_por_producto(request.user, list(acumulado))
+            for pk, cantidad in acumulado.items():
+                prod = bloqueados[pk]
+                if prod.stock < cantidad:
+                    raise StockInsuficiente(f'Stock insuficiente para {prod.nombre}')
+                disponible = prod.stock - reservas.get(pk, 0)
+                if disponible < cantidad:
+                    raise StockInsuficiente(mensaje_sin_disponible(prod.nombre, disponible))
+
             venta = Venta.objects.create(
                 total=total_final,
                 estado='pendiente',
@@ -119,7 +162,8 @@ def iniciar_pago(request):
                 region=region_cliente,
                 costo_envio=costo_despacho,
                 cupon_usado=nombre_cupon,
-                descuento_aplicado=descuento_dinero
+                descuento_aplicado=descuento_dinero,
+                **campos_direccion
             )
 
             for p_data in productos_a_comprar:
@@ -130,17 +174,23 @@ def iniciar_pago(request):
                     precio_unitario=p_data['obj'].precio,
                     subtotal=p_data['subtotal']
                 )
+    except StockInsuficiente as e:
+        return JsonResponse({'error': str(e)}, status=400)
 
-            session_id = str(secrets.randbelow(900000) + 100000)
-            respuesta = _transaccion().create(str(venta.id), session_id, total_final, settings.WEBPAY_RETURN_URL)
+    # La llamada a Webpay va fuera de la transacción para no mantener bloqueada la base mientras se espera
+    try:
+        session_id = str(secrets.randbelow(900000) + 100000)
+        respuesta = _transaccion().create(str(venta.id), session_id, total_final, settings.WEBPAY_RETURN_URL)
 
-            # El token queda en la venta para validar el retorno de Webpay
-            venta.codigo_comprobante = respuesta['token']
-            venta.save(update_fields=['codigo_comprobante'])
+        # El token queda en la venta para validar el retorno de Webpay
+        venta.codigo_comprobante = respuesta['token']
+        venta.save(update_fields=['codigo_comprobante'])
     except TransbankError:
+        _cambiar_estado(venta, 'anulado')
         logger.exception('Webpay rechazó la creación de la transacción')
         return JsonResponse({'error': 'No se pudo iniciar el pago. Intenta más tarde.'}, status=502)
     except ImproperlyConfigured:
+        _cambiar_estado(venta, 'anulado')
         logger.exception('Webpay mal configurado')
         return JsonResponse({'error': 'Pagos no disponibles'}, status=503)
 
@@ -291,6 +341,14 @@ def _reembolsar(venta, token, monto, motivo):
     )
 
 
+def _texto_direccion(venta):
+    partes = [f'{venta.direccion_calle} {venta.direccion_numero}'.strip()]
+    if venta.direccion_complemento:
+        partes.append(venta.direccion_complemento)
+    partes.append(f'{venta.direccion_comuna}, {venta.region}'.strip(', '))
+    return ', '.join(p for p in partes if p)
+
+
 def _enviar_correo_compra(venta):
     if not (venta.usuario and venta.usuario.email):
         return
@@ -307,6 +365,7 @@ def _enviar_correo_compra(venta):
         + '\n'.join(lineas) + '\n\n'
         f'Subtotal productos: ${subtotal}\n'
         f'Envío ({venta.region}): +${venta.costo_envio}\n'
+        f'Despacho a: {_texto_direccion(venta)}\n'
         f'Descuento: -${venta.descuento_aplicado}\n'
         f'TOTAL PAGADO: ${venta.total}\n\n'
         'Gracias por comprar con nosotros.\nEl Equipo de Ventas'

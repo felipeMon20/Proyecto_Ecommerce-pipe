@@ -3,6 +3,7 @@ from django.db.models import Sum, Count, F
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from ..models import Venta, DetalleVenta, Producto, User, Egreso, AuditLog # <--- Import AuditLog
+from ..errores import error_interno
 import json
 
 # --- IMPORTS PARA PDF (REPORTLAB) ---
@@ -47,7 +48,23 @@ def obtener_dashboard(request):
                     'fecha': v.fecha_compra.strftime("%Y-%m-%d %H:%M")
                 })
 
+            desde = timezone.now() - timezone.timedelta(days=13)
+            por_dia = {}
+            for venta in Venta.objects.filter(estado='pagado', fecha_compra__gte=desde.replace(hour=0, minute=0, second=0)):
+                dia = timezone.localtime(venta.fecha_compra).strftime('%Y-%m-%d')
+                por_dia[dia] = por_dia.get(dia, 0) + venta.total
+            serie = []
+            for i in range(13, -1, -1):
+                dia = (timezone.localtime() - timezone.timedelta(days=i)).strftime('%Y-%m-%d')
+                serie.append({'fecha': dia, 'total': por_dia.get(dia, 0)})
+
+            stock_bajo = list(Producto.objects.filter(stock__lte=5).order_by('stock', 'nombre').values('id', 'nombre', 'codigo', 'stock')[:8])
+            pendientes = Venta.objects.filter(estado='pendiente').count()
+
             return JsonResponse({
+                'ventas_por_dia': serie,
+                'stock_bajo': stock_bajo,
+                'pendientes': pendientes,
                 'finanzas': {
                     'ingresos': ingresos_totales,
                     'egresos': egresos_totales,
@@ -64,7 +81,7 @@ def obtener_dashboard(request):
             })
 
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
 
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
@@ -105,7 +122,7 @@ def registrar_egreso(request):
             })
 
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+            return error_interno(500)
     return JsonResponse({'error': 'Método no permitido'}, status=405)
 
 def listar_egresos(request):

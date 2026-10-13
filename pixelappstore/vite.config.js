@@ -12,6 +12,7 @@ export default defineConfig({
       '/api': {
         target: BACKEND,
         changeOrigin: true,
+        xfwd: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
       '/media': { target: BACKEND, changeOrigin: true },

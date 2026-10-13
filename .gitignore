@@ -5,6 +5,7 @@
 db.sqlite3
 *.sqlite3
 ecommerce_backend/SistemaVentas/media/
+ecommerce_backend/SistemaVentas/cache_django/
 
 # Python
 __pycache__/
@@ -22,3 +23,17 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Respaldos, registros y temporales
+*.log
+*.bak
+*.orig
+respaldo/
+backups/
+*.dump
+tmp/
+temp/
+edge-*/
+
+# Herramientas del agente (config local)
+.claude/
