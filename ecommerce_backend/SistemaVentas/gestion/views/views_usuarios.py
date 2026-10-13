@@ -19,8 +19,11 @@ from rest_framework.response import Response
 
 import json
 import os
-import random
+import secrets
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
 # SECCIÓN 1: GESTIÓN DE USUARIOS
@@ -87,101 +90,140 @@ def listar_usuarios(request):
 # SECCIÓN 2: LOGIN CON 2FA, BLOQUEO Y AHORA JWT (ID 24)
 # ---------------------------------------------------------
 
+MAX_INTENTOS = 3
+MINUTOS_BLOQUEO = 5
+MINUTOS_VIGENCIA_CODIGO = 10
+
+
+def _registrar_intento_fallido(perfil):
+    """ Suma un intento fallido y bloquea la cuenta al llegar al máximo """
+    perfil.intentos_fallidos += 1
+    bloqueada = perfil.intentos_fallidos >= MAX_INTENTOS
+    if bloqueada:
+        perfil.bloqueado_hasta = timezone.now() + timedelta(minutes=MINUTOS_BLOQUEO)
+        perfil.intentos_fallidos = 0
+    perfil.save()
+    return bloqueada
+
+
+def _respuesta_bloqueo(perfil):
+    segundos = int((perfil.bloqueado_hasta - timezone.now()).total_seconds())
+    return JsonResponse({'error': f'Cuenta bloqueada. Espera {segundos}s.'}, status=403)
+
+
 @csrf_exempt
 def solicitar_login(request):
     """ Paso 1: Validar usuario/clave y enviar código """
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            username = data.get('username')
-            password = data.get('password')
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Método no permitido'}, status=405)
 
-            user_obj = User.objects.filter(username=username).first()
-            if not user_obj:
-                 return JsonResponse({'error': 'Usuario o contraseña incorrectos'}, status=401)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'JSON inválido'}, status=400)
 
-            perfil, created = PerfilSeguridad.objects.get_or_create(user=user_obj)
+    username = data.get('username')
+    password = data.get('password')
+    error_credenciales = JsonResponse({'error': 'Usuario o contraseña incorrectos'}, status=401)
 
-            if perfil.bloqueado_hasta and perfil.bloqueado_hasta > timezone.now():
-                tiempo = int((perfil.bloqueado_hasta - timezone.now()).total_seconds())
-                return JsonResponse({'error': f'Cuenta bloqueada. Espera {tiempo}s.'}, status=403)
+    user_obj = User.objects.filter(username=username).first()
+    if not user_obj:
+        return error_credenciales
 
-            user = authenticate(request, username=username, password=password)
+    perfil, _ = PerfilSeguridad.objects.get_or_create(user=user_obj)
 
-            if user is not None:
-                perfil.intentos_fallidos = 0
-                perfil.bloqueado_hasta = None
-                perfil.save()
+    if perfil.bloqueado_hasta and perfil.bloqueado_hasta > timezone.now():
+        return _respuesta_bloqueo(perfil)
 
-                codigo_nuevo = str(random.randint(100000, 999999))
-                Codigo2FA.objects.update_or_create(user=user, defaults={'codigo': codigo_nuevo})
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        if _registrar_intento_fallido(perfil):
+            return JsonResponse({'error': f'Cuenta BLOQUEADA por {MINUTOS_BLOQUEO} min.'}, status=403)
+        return error_credenciales
 
-                try:
-                    send_mail(
-                        'Tu Código de Verificación',
-                        f'Hola {user.first_name}, tu código: {codigo_nuevo}',
-                        settings.EMAIL_HOST_USER,
-                        [user.email],
-                        fail_silently=False,
-                    )
-                except:
-                    pass 
-                
-                return JsonResponse({'mensaje': 'Credenciales válidas. Código enviado.'})
-            
-            else:
-                perfil.intentos_fallidos += 1
-                if perfil.intentos_fallidos >= 3:
-                    perfil.bloqueado_hasta = timezone.now() + timedelta(minutes=5)
-                    perfil.intentos_fallidos = 0
-                    perfil.save()
-                    return JsonResponse({'error': 'Cuenta BLOQUEADA por 5 min.'}, status=403)
-                
-                perfil.save()
-                return JsonResponse({'error': f'Clave incorrecta. Intento {perfil.intentos_fallidos}/3'}, status=401)
+    if not user.email:
+        return JsonResponse({'error': 'La cuenta no tiene correo para enviar el código'}, status=400)
 
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
-    return JsonResponse({'error': 'Método no permitido'}, status=405)
+    perfil.intentos_fallidos = 0
+    perfil.bloqueado_hasta = None
+    perfil.save()
+
+    codigo_nuevo = f'{secrets.randbelow(900000) + 100000}'
+    Codigo2FA.objects.filter(user=user).delete()
+    registro = Codigo2FA.objects.create(user=user, codigo=codigo_nuevo)
+
+    try:
+        send_mail(
+            'Tu Código de Verificación',
+            f'Hola {user.first_name or user.username}, tu código: {codigo_nuevo}\n'
+            f'Vence en {MINUTOS_VIGENCIA_CODIGO} minutos.',
+            settings.EMAIL_HOST_USER,
+            [user.email],
+            fail_silently=False,
+        )
+    except Exception:
+        logger.exception('No se pudo enviar el código 2FA al usuario %s', user.pk)
+        registro.delete()
+        return JsonResponse({'error': 'No se pudo enviar el código. Intenta más tarde.'}, status=503)
+
+    return JsonResponse({'mensaje': 'Credenciales válidas. Código enviado.'})
+
 
 @csrf_exempt
 def verificar_codigo_login(request):
     """ Paso 2: Validar código y emitir TOKEN JWT """
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            username = data.get('username')
-            codigo_ingresado = data.get('codigo')
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Método no permitido'}, status=405)
 
-            user = User.objects.get(username=username)
-            registro_2fa = Codigo2FA.objects.get(user=user)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'JSON inválido'}, status=400)
 
-            if registro_2fa.codigo == codigo_ingresado:
-                # 1. Login clásico (Cookies/Sesión Web)
-                login(request, user)
-                
-                # 2. Generar Tokens JWT (Para API/Móvil) - ID 24
-                refresh = RefreshToken.for_user(user)
-                access_token = str(refresh.access_token)
-                
-                # Limpiar código usado
-                registro_2fa.delete()
-                
-                return JsonResponse({
-                    'mensaje': 'Autenticación exitosa',
-                    'usuario': user.username,
-                    'es_admin': user.is_staff,
-                    'es_superuser': user.is_superuser,
-                    # --- TOKENS JWT ENTREGADOS ---
-                    'access_token': access_token,
-                    'refresh_token': str(refresh)
-                })
-            else:
-                return JsonResponse({'error': 'Código incorrecto'}, status=400)
+    codigo_ingresado = str(data.get('codigo') or '')
+    error_generico = JsonResponse({'error': 'Código incorrecto o vencido'}, status=400)
 
-        except Exception:
-            return JsonResponse({'error': 'Falló la autenticación'}, status=400)
-    return JsonResponse({'error': 'Método no permitido'}, status=405)
+    user = User.objects.filter(username=data.get('username')).first()
+    if not user:
+        return error_generico
+
+    perfil, _ = PerfilSeguridad.objects.get_or_create(user=user)
+    if perfil.bloqueado_hasta and perfil.bloqueado_hasta > timezone.now():
+        return _respuesta_bloqueo(perfil)
+
+    registro_2fa = Codigo2FA.objects.filter(user=user).first()
+    if not registro_2fa:
+        return error_generico
+
+    vencido = timezone.now() - registro_2fa.creado_en > timedelta(minutes=MINUTOS_VIGENCIA_CODIGO)
+    coincide = secrets.compare_digest(registro_2fa.codigo, codigo_ingresado)
+
+    if vencido:
+        registro_2fa.delete()
+        return error_generico
+
+    if not coincide:
+        if _registrar_intento_fallido(perfil):
+            registro_2fa.delete()
+            return JsonResponse({'error': f'Cuenta BLOQUEADA por {MINUTOS_BLOQUEO} min.'}, status=403)
+        return error_generico
+
+    registro_2fa.delete()
+    perfil.intentos_fallidos = 0
+    perfil.save()
+
+    # Sesión web (cookie) y tokens JWT para la API
+    login(request, user)
+    refresh = RefreshToken.for_user(user)
+
+    return JsonResponse({
+        'mensaje': 'Autenticación exitosa',
+        'usuario': user.username,
+        'es_admin': user.is_staff,
+        'es_superuser': user.is_superuser,
+        'access_token': str(refresh.access_token),
+        'refresh_token': str(refresh)
+    })
 
 @csrf_exempt
 def cerrar_sesion(request):

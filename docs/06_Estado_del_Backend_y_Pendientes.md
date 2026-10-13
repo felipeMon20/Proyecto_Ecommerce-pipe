@@ -29,8 +29,8 @@ Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `
 - ✅ *Corregido 12-10-2026:* **`cantidad` sin validar** en `iniciar_pago`: un valor negativo reducía el total. Ahora exige entero ≥ 1 y valida stock al iniciar (el descuento de stock sigue ocurriendo solo al confirmar).
 - **Cupones:** el porcentaje ya se limita a 0-100 al aplicarlo (12-10-2026); sigue sin límite de usos y nunca se "consume".
 - **`confirmar_pago`:** si el usuario aborta en Webpay llega `TBK_TOKEN`, no `token_ws`, y responde 400 sin tocar la venta; una venta rechazada queda `pendiente` para siempre (el estado `rechazado` nunca se usa); un refresco repite `commit` y falla; `correo_enviado: True` se devuelve siempre aunque el envío falle.
-- **2FA débil:** el código no expira (`creado_en` sin usar), `login-paso2` no limita intentos (6 dígitos fuerza-bruteables sin bloqueo), usa `random` en vez de `secrets`, y si falla el SMTP el error se traga (`except: pass`) y el usuario queda sin poder entrar.
-- **Enumeración de usuarios** en `login-paso1` (distintos mensajes si el usuario no existe).
+- ✅ *Corregido 12-10-2026:* **2FA débil** (código sin expiración, sin límite de intentos en el paso 2, `random` en vez de `secrets`, error de SMTP tragado). Detalle en [[04_Autenticacion_y_Seguridad]] §1-2.
+- ✅ *Corregido 12-10-2026:* enumeración de usuarios en `login-paso1`. Queda un resto menor: el mensaje de cuenta bloqueada solo aparece para usuarios que existen.
 - **Borrar un usuario borra sus ventas** (`Venta.usuario` en `CASCADE`): se pierde historial financiero.
 - **`productos/eliminar-todos` y `reemplazar`** fallan con 500 en cuanto existan ventas (`DetalleVenta.producto` es `PROTECT`) y `reemplazar` no restaura imágenes.
 - **Descuento de stock sin bloqueo** en `confirmar_pago` (condición de carrera entre dos pagos simultáneos); el POS sí usa `select_for_update`.
@@ -75,5 +75,5 @@ Si el repo ya se subió, hay que **rotar la clave de aplicación de Gmail y la `
 3. ~~BYPASS condicionado a `DEBUG` (C1)~~ hecho.
 4. Decidir autenticación única (JWT en todas las vistas con DRF, o sesión + CORS credentials) (C3).
 5. Rehacer el flujo de pago: validar stock y cantidades al iniciar, reservar/descontar con bloqueo, manejar `TBK_TOKEN`/rechazo, redirigir al frontend, variables de entorno para URL y credenciales.
-6. Endurecer 2FA (expiración, intentos, `secrets`).
+6. ~~Endurecer 2FA (expiración, intentos, `secrets`)~~ hecho 12-10-2026.
 7. `requirements.txt`, ajuste de zona horaria y recién ahí, si se pide, tests.
