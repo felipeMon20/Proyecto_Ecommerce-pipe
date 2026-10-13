@@ -1,0 +1,20 @@
+[
+    {
+        "id": 1,
+        "username": "admin_felipe",
+        "password": "admin123",
+        "email": "fmonsalvepoke123@gmail.com",
+        "nombre": "Felipe",
+        "apellido": "Monsalve",
+        "es_admin": true
+    },
+    {
+        "id": 2,
+        "username": "vendedor_juan",
+        "password": "user123",
+        "email": "fmonsalvepoke123+vendedor@gmail.com",
+        "nombre": "Juan",
+        "apellido": "Pérez",
+        "es_admin": false
+    }
+]

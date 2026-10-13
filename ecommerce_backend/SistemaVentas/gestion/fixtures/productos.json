@@ -1,0 +1,42 @@
+[
+    {
+        "nombre": "Mouse Logitech G203",
+        "codigo": "LOG-G203",
+        "precio": 25990,
+        "stock": 50,
+        "marca": "Logitech",
+        "categoria_id": 1
+    },
+    {
+        "nombre": "Teclado Mecánico Redragon",
+        "codigo": "RED-K552",
+        "precio": 45000,
+        "stock": 30,
+        "marca": "Redragon",
+        "categoria_id": 1
+    },
+    {
+        "nombre": "Audífonos HyperX Cloud II",
+        "codigo": "HYP-CLD2",
+        "precio": 89990,
+        "stock": 15,
+        "marca": "HyperX",
+        "categoria_id": 1
+    },
+    {
+        "nombre": "Procesador Ryzen 5 5600X",
+        "codigo": "AMD-5600X",
+        "precio": 180000,
+        "stock": 10,
+        "marca": "AMD",
+        "categoria_id": 1
+    },
+    {
+        "nombre": "Memoria RAM 16GB Fury",
+        "codigo": "KIN-16GB",
+        "precio": 42000,
+        "stock": 100,
+        "marca": "Kingston",
+        "categoria_id": 1
+    }
+]
